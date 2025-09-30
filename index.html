@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Lua Code Editor</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<style>
+  html, body {
+    margin:0; padding:0; height:100%; width:100%;
+    overflow:hidden; background:#1e1e1e;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+  #menubar{height:30px;background:#2d2d2d;color:#eee;display:flex;align-items:center;padding:0 10px;font-family:sans-serif;font-size:14px}
+  #fileMenu{position:relative;margin-right:20px;cursor:pointer;user-select:none}
+  .dropdown{display:none;position:absolute;top:30px;left:0;background:#333;border:1px solid #444;z-index:99;min-width:120px}
+  .dropdown div{padding:6px 12px;cursor:pointer;white-space:nowrap}
+  .dropdown div:hover{background:#444}
+  #tabs{height:30px;background:#252526;display:flex;align-items:center;overflow-x:auto}
+  .tab{padding:0 15px;height:100%;display:flex;align-items:center;color:#ccc;cursor:pointer;border-right:1px solid #333}
+  .tab.active{background:#1e1e1e;color:#fff}
+  #container{width:100%;height:calc(100% - 60px)}
+  #statusbar{height:30px;background:#252526;color:#ccc;font-size:13px;display:flex;align-items:center;padding:0 10px;font-family:monospace}
+  #statusbar.error{color:#ff5555}
+  #statusbar.ok{color:#55ff55}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
+</head>
+<body>
+  <div id="menubar">
+    <div id="fileMenu">📂 File ▼
+      <div class="dropdown" id="fileDropdown">
+        <div onclick="newFile()">New File</div>
+        <div onclick="renameFile()">Rename File</div>
+        <div onclick="deleteFile()">Delete File</div>
+      </div>
+    </div>
+    <div style="flex:1"></div>
+  </div>
+
+  <div id="tabs"></div>
+  <div id="container"></div>
+  <div id="statusbar">Ready.</div>
+
+<script>
+  let editor, currentFile=null;
+  let files = JSON.parse(localStorage.getItem("luaFiles")||"{}");
+
+  // Disable pull-to-refresh
+  document.addEventListener("touchmove", function(e){
+    if(e.touches.length>1) return;
+    e.preventDefault();
+  }, {passive:false});
+
+  // File menu toggle
+  const fileMenu = document.getElementById("fileMenu");
+  const dropdown = document.getElementById("fileDropdown");
+  fileMenu.addEventListener("click", e=>{
+    dropdown.style.display = dropdown.style.display==="block" ? "none" : "block";
+    e.stopPropagation();
+  });
+  document.addEventListener("click", ()=>{ dropdown.style.display="none"; });
+
+  // Monaco load
+  require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' }});
+  require(["vs/editor/editor.main"], function () {
+    editor = monaco.editor.create(document.getElementById('container'), {
+      value: "",
+      language: "lua",
+      theme: "vs-dark",
+      automaticLayout: true
+    });
+    if(Object.keys(files).length===0){
+      files["untitled.lua"] = "-- New Lua file";
+      saveFiles();
+    }
+    loadTabs();
+    switchFile(Object.keys(files)[0]);
+
+    editor.onDidChangeModelContent(()=>{
+      if(currentFile){
+        files[currentFile]=editor.getValue();
+        saveFiles();
+      }
+      runChecker();
+    });
+
+    // Bind Ctrl+F untuk Find
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF, function() {
+      editor.getAction('actions.find').run();
+    });
+
+    // Bind Alt+Enter untuk select all match
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Enter, function() {
+      editor.getAction('editor.action.selectAllMatches').run();
+    });
+
+    // Bind Ctrl+H untuk Replace
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyH, function() {
+      editor.getAction('editor.action.startFindReplaceAction').run();
+    });
+  });
+
+  // File ops
+  function saveFiles(){ localStorage.setItem("luaFiles", JSON.stringify(files)); }
+  function loadTabs(){
+    let tabsDiv = document.getElementById("tabs");
+    tabsDiv.innerHTML="";
+    Object.keys(files).forEach(f=>{
+      let t=document.createElement("div");
+      t.className="tab"+(f===currentFile?" active":"");
+      t.innerText=f;
+      t.onclick=()=>switchFile(f);
+      tabsDiv.appendChild(t);
+    });
+  }
+  function switchFile(name){
+    if(currentFile){ files[currentFile]=editor.getValue(); saveFiles(); }
+    currentFile=name;
+    editor.setValue(files[name]||"");
+    loadTabs();
+    runChecker();
+  }
+  function newFile(){
+    let name=prompt("New file name:","untitled"+(Object.keys(files).length+1)+".lua");
+    if(!name) return;
+    if(files[name]){ alert("File exists!"); return; }
+    files[name]="-- "+name;
+    saveFiles();
+    loadTabs();
+    switchFile(name);
+  }
+  function renameFile(){
+    if(!currentFile) return;
+    let newName=prompt("Rename file:",currentFile);
+    if(!newName||newName===currentFile) return;
+    if(files[newName]){ alert("File exists!"); return; }
+    files[newName]=files[currentFile];
+    delete files[currentFile];
+    currentFile=newName;
+    saveFiles();
+    loadTabs();
+    switchFile(newName);
+  }
+  function deleteFile(){
+    if(!currentFile) return;
+    if(!confirm("Delete "+currentFile+"?")) return;
+    delete files[currentFile];
+    saveFiles();
+    let keys=Object.keys(files);
+    if(keys.length===0){
+      files["untitled.lua"]="-- empty";
+      saveFiles();
+    }
+    switchFile(Object.keys(files)[0]);
+  }
+
+  // Checker
+  function runChecker(){
+    const status=document.getElementById("statusbar");
+    let code=editor.getValue();
+    let open=(code.match(/\(/g)||[]).length;
+    let close=(code.match(/\)/g)||[]).length;
+    if(open!==close){
+      status.textContent="⚠️ Unmatched parentheses";
+      status.className="error";
+      return;
+    }
+    let funs=(code.match(/\bfunction\b/g)||[]).length;
+    let ends=(code.match(/\bend\b/g)||[]).length;
+    if(ends<funs){
+      status.textContent="⚠️ Missing 'end'";
+      status.className="error";
+      return;
+    }
+    status.textContent="✔ No syntax issue detected";
+    status.className="ok";
+  }
+
+  window.addEventListener("beforeunload",()=>{
+    if(currentFile) files[currentFile]=editor.getValue(), saveFiles();
+  });
+</script>
+</body>
+</html>
